@@ -14,6 +14,8 @@ class Mutation:
         self.sample_count = sample_count
         self.total_count = total_count
         self.gene_freq = 0
+        self.rank = 0
+        self.total = 0
 
 # handling invalid input
 if len(sys.argv) < 3:
@@ -45,9 +47,15 @@ def re_capture(line):
     target_index = bisect.bisect_left(gene_mutation_names, name)
     if target_index >= len(gene_mutation_names) or gene_mutation_names[target_index] != name:
         bisect.insort(gene_mutation_names, name)
-        gene_mutation_counts[name] = sample_count
+        gene_mutation_counts[name] = [sample_count, []]
+        rank_counts[name] = {sample_count: 1}
     else:
-        gene_mutation_counts[name] += sample_count
+        gene_mutation_counts[name][0] += sample_count
+        if sample_count in rank_counts[name]:
+            rank_counts[name][sample_count] += 1
+        else:
+            rank_counts[name][sample_count] = 1
+        
     
     # using MOAR regex to determine if a mutation is a loss of cysteine
     if re.search("p\.C", mut) != None and can_stat == "y":
@@ -75,8 +83,10 @@ FILE_LENGTH2 = (39698736 - 21)
 
 # defining data structures
 mutations_list = []
+gene_list = []
 gene_mutation_names = []
 gene_mutation_counts = {}
+rank_counts = {}
 
 print("Starting...")
 # creating a progress bar
@@ -89,6 +99,7 @@ with open(filepath2, 'r') as mut_file2:
         new_mutation = re_capture(line)
         if new_mutation != None:
             mutations_list.append(new_mutation)
+            gene_mutation_counts[new_mutation.name][1].append(new_mutation)
         progress_bar.update(1)
 
 # closing progress bar
@@ -104,18 +115,46 @@ with open(filepath1, 'r') as mut_file2:
         new_mutation = re_capture(line)
         if new_mutation != None:
             mutations_list.append(new_mutation)
+            gene_mutation_counts[new_mutation.name][1].append(new_mutation)
         progress_bar.update(1)
 
 progress_bar.close()
 sys.stdout.flush()
 print("Scanning " + filepath1 + " done.")
 
-# obtaining mutation frequencies
-for mutation in mutations_list:
-    mutation.gene_freq = (mutation.sample_count / (gene_mutation_counts[mutation.name])) * 100
+mutations_list_new = []
 
+progress_bar = tqdm(total=len(mutations_list), desc="  Parsing genomic mutation screen... ", unit=" mutations")
+# obtaining mutation frequencies
+for gene in gene_mutation_names:
+    if len(gene_mutation_counts[gene][1]) == 0:
+        continue
+    for mutation in gene_mutation_counts[gene][1]:
+        search_pattern = mutation.mutation[:-1]
+        for other_mutation in gene_mutation_counts[gene][1]:
+            if gene_mutation_counts[gene][1].index(mutation) != gene_mutation_counts[gene][1].index(other_mutation) and search_pattern == other_mutation.mutation[:-1]:
+                mutation.sample_count += other_mutation.sample_count
+                gene_mutation_counts[gene][1].pop(gene_mutation_counts[gene][1].index(other_mutation))
+
+        mutation.gene_freq = (mutation.sample_count / (gene_mutation_counts[gene][0])) * 100
+        m_before = 0
+        for key in rank_counts[mutation.name]:
+            value = rank_counts[mutation.name][key]
+            mutation.total += value
+            if key > mutation.sample_count:
+                m_before += value
+            elif key == mutation.sample_count:
+                if value % 2 == 0:
+                    m_before += value / 2
+                else:
+                    m_before += (value - 1) / 2
+        mutation.rank = m_before + 1
+        mutations_list_new.append(mutation)
+        progress_bar.update(1)
+
+progress_bar.close()
 # sorting mutations based on frequency
-mutations_list_sorted = sorted(mutations_list, key = lambda x : x.gene_freq)
+mutations_list_sorted = sorted(mutations_list_new, key = lambda x : x.gene_freq)
 
 # identifying maximum length of each field for formatting purposes
 max_name_len = max(len(mutation_entry.name) for mutation_entry in mutations_list_sorted)
@@ -123,10 +162,17 @@ max_type_len = max(len(mutation_entry.mut_type) for mutation_entry in mutations_
 max_mutation_len = max(len(mutation_entry.mutation) for mutation_entry in mutations_list_sorted)
 
 # formatting all the data for printing and writing to output file line by line
+output_file.write("GENE\tMUTATION\tSAMPLE COUNT\tFREQUENCY\tRANK")
 for i in range(len(mutations_list_sorted)):
-    line = "{:<{}} {:<{}} {:<{}} {:<{}} {:<{}}%\n".format(str(mutations_list_sorted[i].name), max_name_len, mutations_list_sorted[i].mut_type, max_type_len, str(mutations_list_sorted[i].mutation), max_mutation_len, str(mutations_list_sorted[i].sample_count), 2, str(round(mutations_list_sorted[i].gene_freq, 3)), 6)
+    line = "{:<{}} {:<{}} {:<{}} {:<{}}\t {:<{}}%\t {:<{}}\n".format(str(mutations_list_sorted[i].name), max_name_len, mutations_list_sorted[i].mut_type, max_type_len, str(mutations_list_sorted[i].mutation), max_mutation_len, str(mutations_list_sorted[i].sample_count), 2, str(round(mutations_list_sorted[i].gene_freq, 3)), 6, str(int(mutations_list_sorted[i].rank)) + " / " + str(mutations_list_sorted[i].total), 8)
     output_file.write(line)
 
 print("Output written to " + output_filename + ".")
 
-    
+# create a graphic explanation of how the program works (diagrams of data structures + examples)
+# group cysteines into a single C position mutation (e.g, p.C49H p.C49R p.C49A >> p.C49x)
+'''
+ OUTPUT FORMAT
+ GENE   MUTATION   COUNT   FREQ    RANK
+ GAPDH  C53A       12      0.5%    1/250
+'''
